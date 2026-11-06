@@ -1,0 +1,112 @@
+name: Build APKs
+
+# Builds the same set of APKs that live under apk/ (one per ABI plus the
+# universal fallback) on GitHub's runners, so a build never depends on a local
+# NDK/CMake/JDK install.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One build per branch: a new push cancels the previous, still-running one.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Assemble release APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # The versions are pinned by app/build.gradle.kts (ndkVersion, cmake version)
+      # and the README. Installing them explicitly keeps the build identical to a
+      # local one instead of silently using whatever the runner image ships.
+      - name: Install NDK, CMake and SDK packages
+        run: |
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Optional real release signing. Add these repository secrets to sign with
+      # the same key as the APKs in apk/:
+      #   KEYSTORE_BASE64    base64 of the .jks/.keystore file, e.g. `base64 -i release.jks`
+      #   KEYSTORE_PASSWORD  store password
+      #   KEY_ALIAS          key alias
+      #   KEY_PASSWORD       key password
+      # Without them the build still succeeds: app/build.gradle.kts falls back to
+      # the debug signing config, so the APKs install fine but cannot replace an
+      # already installed release-signed iMirror (different signature).
+      - name: Provide release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "${KEYSTORE_BASE64}" ]; then
+            echo "::notice::No KEYSTORE_BASE64 secret set — APKs will be debug-signed."
+            exit 0
+          fi
+          keystore="${RUNNER_TEMP}/release.keystore"
+          printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${keystore}"
+          {
+            echo "KEYSTORE_PATH=${keystore}"
+            echo "KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}"
+            echo "KEY_ALIAS=${KEY_ALIAS}"
+            echo "KEY_PASSWORD=${KEY_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Assemble release APKs
+        run: ./gradlew --no-daemon assembleRelease
+
+      # Gradle writes app-<abi>-release.apk; rename to the scheme used in apk/
+      # so the artifact is directly usable: iMirror-<version>-<abi>.apk
+      - name: Collect and rename APKs
+        run: |
+          version="$(grep -oE 'versionName *= *"[^"]+"' app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)"/\1/')"
+          if [ -z "${version}" ]; then
+            echo "::error::Could not read versionName from app/build.gradle.kts"
+            exit 1
+          fi
+          echo "Building iMirror ${version}" >> "${GITHUB_STEP_SUMMARY}"
+          mkdir -p dist
+          for apk in app/build/outputs/apk/release/*.apk; do
+            base="$(basename "${apk}" .apk)"          # app-armeabi-v7a-release
+            abi="${base#app-}"
+            abi="${abi%-release}"
+            # A build without ABI splits would have no suffix of its own
+            if [ "${abi}" = "${base}" ]; then abi="universal"; fi
+            out="dist/iMirror-${version}-${abi}.apk"
+            cp "${apk}" "${out}"
+            echo "- \`$(basename "${out}")\` ($(du -h "${out}" | cut -f1))" >> "${GITHUB_STEP_SUMMARY}"
+          done
+          ls -l dist
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: iMirror-apks
+          path: dist/*.apk
+          if-no-files-found: error

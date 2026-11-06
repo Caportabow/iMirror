@@ -31,39 +31,43 @@ import dev.imirror.receiver.util.Logger
  */
 class VideoDecoder(@Volatile private var outputSurface: Surface) {
 
+    /**
+     * Decoder-thread only. False while the decoder is parked on a surface that is not on screen.
+     * Decoding continues (reference frames are preserved) but finished frames are not rendered.
+     */
+    private var renderOutput = true
+
+    /**
+     * Points the running codec at [surface] WITHOUT flushing it, so H.264 reference frames survive
+     * an Activity background → foreground transition instead of waiting for the next keyframe.
+     * Pass render=false to keep decoding while nothing is visible (TV in standby, app backgrounded).
+     *
+     * Returns false when the switch did not happen — invalid surface, no codec yet, or a codec that
+     * rejects setOutputSurface — in which case the caller must rebuild the decoder instead.
+     */
+    fun switchOutputSurface(surface: Surface, render: Boolean): Boolean {
+        if (!surface.isValid) return false
+        return try {
+            if (surface !== outputSurface) {
+                val codec = mediaCodec ?: return false
+                codec.setOutputSurface(surface)
+                outputSurface = surface
+            }
+            renderOutput = render
+            Logger.i("VideoDecoder: output surface switched (render=$render)")
+            true
+        } catch (e: Exception) {
+            Logger.w("Output surface switch failed: ${e.javaClass.simpleName}")
+            false
+        }
+    }
+
     // The underlying hardware decoder — null until initialize() is called
     private var mediaCodec: MediaCodec? = null
 
     // Track whether the decoder has been initialized (to prevent double-init)
     @Volatile
     private var isInitialized = false
-
-    /**
-     * Whether the output surface is currently attached and valid for rendering.
-     * When false, decoded frames are released without displaying to prevent IllegalStateException
-     * when the TV screen is turned off or in standby.
-     */
-    @Volatile
-    var isSurfaceValid: Boolean = true
-
-    /**
-     * Dynamically switches the output surface (e.g. when the TV turns back on).
-     * Supported in Android API 23+. Returns true if successful.
-     */
-    fun setOutputSurface(newSurface: Surface): Boolean {
-        return try {
-            val codec = mediaCodec ?: return false
-            codec.setOutputSurface(newSurface)
-            outputSurface = newSurface
-            isSurfaceValid = true
-            Logger.i("VideoDecoder: dynamically updated output surface")
-            true
-        } catch (e: Exception) {
-            Logger.e("VideoDecoder: setOutputSurface failed", e)
-            isHealthy = false
-            false
-        }
-    }
 
     /**
      * False once MediaCodec has thrown (entered an unrecoverable error state). The caller should
@@ -260,10 +264,14 @@ class VideoDecoder(@Volatile private var outputSurface: Surface) {
                 // The decoder parsed the real size from the SPS — authoritative for aspect-fit.
                 publishOutputSize(codec.outputFormat)
             } else {
-                // Render immediately if surface is valid. If the TV screen is off or standby,
-                // discard without rendering to avoid IllegalStateException on a dead surface.
-                val shouldRender = isSurfaceValid && outputSurface.isValid
-                codec.releaseOutputBuffer(outputBufferIndex, shouldRender)
+                // Render immediately, but only onto a live surface: while parked (TV standby or app
+                // backgrounded) the frame is released without displaying, so a dead surface can never
+                // throw IllegalStateException. We deliberately do NOT schedule a future render time for
+                // A/V sync: this Surface's BufferQueue holds only ~3 frames, so any hold quickly
+                // back-pressures the decoder → the upstream frame queue saturates → big latency +
+                // dropped (corrupt) frames. A/V alignment is handled by keeping the AUDIO path
+                // low-latency instead (AudioStreamServer).
+                codec.releaseOutputBuffer(outputBufferIndex, renderOutput && outputSurface.isValid)
             }
             outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
         }
@@ -296,14 +304,20 @@ class VideoDecoder(@Volatile private var outputSurface: Surface) {
      */
     fun release() {
         Logger.d("Releasing VideoDecoder")
+        val codec = mediaCodec
+        mediaCodec = null
+        isInitialized = false
+        // stop() can fail after configure/start errors; release() must still run.
         try {
-            mediaCodec?.stop()
-            mediaCodec?.release()
+            codec?.stop()
         } catch (e: Exception) {
-            Logger.e("Error releasing MediaCodec (non-fatal)", e)
+            Logger.e("Error stopping MediaCodec (non-fatal)", e)
         } finally {
-            mediaCodec = null
-            isInitialized = false
+            try {
+                codec?.release()
+            } catch (e: Exception) {
+                Logger.e("Error releasing MediaCodec (non-fatal)", e)
+            }
         }
     }
 

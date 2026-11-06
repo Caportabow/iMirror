@@ -67,6 +67,9 @@ android {
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
+                // Optional: set KEYSTORE_TYPE when the keystore is not in the JVM's
+                // default format (an openssl-generated PKCS12 needs this on some setups).
+                System.getenv("KEYSTORE_TYPE")?.let { storeType = it }
             }
         }
     }

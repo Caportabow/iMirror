@@ -1,18 +1,20 @@
 name: Build APKs
 
-# Builds the same set of APKs that live under apk/ (one per ABI plus the
-# universal fallback) on GitHub's runners, so a build never depends on a local
-# NDK/CMake/JDK install.
+# Builds the same set of APKs that used to be committed under apk/ (one per ABI
+# plus the universal fallback) on GitHub's runners, so a build never depends on
+# a local NDK/CMake/JDK install. Tag builds also publish them as release assets.
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # contents: write is only used by the release step; the build itself is read-only.
+  contents: write
 
 concurrency:
-  # One build per branch: a new push cancels the previous, still-running one.
+  # One build per branch/tag: a new push cancels the previous, still-running one.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -35,9 +37,21 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # The versions are pinned by app/build.gradle.kts (ndkVersion, cmake version)
-      # and the README. Installing them explicitly keeps the build identical to a
+      - name: Resolve SDK path
+        run: echo "ANDROID_SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME}}" >> "$GITHUB_ENV"
+
+      # The NDK is ~700 MB and never changes, so it is cached by version. The
+      # pinned versions come from app/build.gradle.kts (ndkVersion, cmake version)
+      # and the README: installing them explicitly keeps the build identical to a
       # local one instead of silently using whatever the runner image ships.
+      - name: Cache NDK and CMake
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_SDK }}/ndk/28.2.13676358
+            ${{ env.ANDROID_SDK }}/cmake/3.22.1
+          key: android-ndk-28.2.13676358-cmake-3.22.1
+
       - name: Install NDK, CMake and SDK packages
         run: |
           sdkmanager --install \
@@ -50,20 +64,22 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # Optional real release signing. Add these repository secrets to sign with
-      # the same key as the APKs in apk/:
-      #   KEYSTORE_BASE64    base64 of the .jks/.keystore file, e.g. `base64 -i release.jks`
+      # your own key:
+      #   KEYSTORE_BASE64    base64 of the keystore, e.g. `base64 -i release.p12`
       #   KEYSTORE_PASSWORD  store password
       #   KEY_ALIAS          key alias
       #   KEY_PASSWORD       key password
+      #   KEYSTORE_TYPE      JKS or PKCS12 (defaults to the JVM default)
       # Without them the build still succeeds: app/build.gradle.kts falls back to
       # the debug signing config, so the APKs install fine but cannot replace an
-      # already installed release-signed iMirror (different signature).
+      # already installed APK signed with a different key.
       - name: Provide release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_TYPE: ${{ secrets.KEYSTORE_TYPE }}
         run: |
           if [ -z "${KEYSTORE_BASE64}" ]; then
             echo "::notice::No KEYSTORE_BASE64 secret set — APKs will be debug-signed."
@@ -76,19 +92,26 @@ jobs:
             echo "KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}"
             echo "KEY_ALIAS=${KEY_ALIAS}"
             echo "KEY_PASSWORD=${KEY_PASSWORD}"
+            echo "KEYSTORE_TYPE=${KEYSTORE_TYPE}"
           } >> "${GITHUB_ENV}"
 
       - name: Assemble release APKs
         run: ./gradlew --no-daemon assembleRelease
 
-      # Gradle writes app-<abi>-release.apk; rename to the scheme used in apk/
-      # so the artifact is directly usable: iMirror-<version>-<abi>.apk
+      # Gradle writes app-<abi>-release.apk; rename to the scheme used by the
+      # release assets so a download is self-explanatory:
+      # iMirror-<version>-<abi>.apk
       - name: Collect and rename APKs
         run: |
           version="$(grep -oE 'versionName *= *"[^"]+"' app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)"/\1/')"
           if [ -z "${version}" ]; then
             echo "::error::Could not read versionName from app/build.gradle.kts"
             exit 1
+          fi
+          # A release tag must agree with the version baked into the APK, otherwise
+          # the assets carry a version nobody tagged.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "${version}" ]; then
+            echo "::warning::Tag ${GITHUB_REF_NAME} does not match versionName ${version}."
           fi
           echo "Building iMirror ${version}" >> "${GITHUB_STEP_SUMMARY}"
           mkdir -p dist
@@ -110,3 +133,21 @@ jobs:
           name: iMirror-apks
           path: dist/*.apk
           if-no-files-found: error
+
+      # Pushing a tag (v1.0.1) turns the build into a release: the same APKs land
+      # as release assets, so the release page is the download page and no signed
+      # binaries need to be committed to the repository.
+      - name: Attach APKs to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/*.apk --clobber
+          else
+            gh release create "${tag}" dist/*.apk \
+              --title "iMirror ${tag}" \
+              --generate-notes
+          fi

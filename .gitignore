@@ -29,7 +29,9 @@ out/
 # Signing configs and keystores — NEVER commit these.
 # The release keystore lives outside the repo (~/.imirror-release.jks) so it cannot
 # be added by accident; these patterns are a second line of defence.
+.signing/
 *.jks
+*.p12
 *.keystore
 *.password
 keystore.properties

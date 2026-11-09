@@ -661,6 +661,12 @@ open class RtspHandler(
                         val ct = (stream["ct"] as? Long)?.toInt() ?: 8   // 8 = AAC-ELD (mirror), 4 = AAC-LC, 2 = ALAC
                         val spf = (stream["spf"] as? Long)?.toInt() ?: 352   // ALAC frameLength (samples/frame)
                         val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf)
+                        if (dataPort <= 0) {
+                            // Audio could not start on this device — omit the stream instead of advertising
+                            // port 0, which makes macOS retry/abort. Video mirroring carries on silently.
+                            Logger.w("audio stream type=96 unavailable — mirroring without sound")
+                            return@mapNotNull null
+                        }
                         activeStreamTypes.add(96)
                         Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch spf=$spf) dataPort=$dataPort controlPort=$controlPort")
                         mapOf("type" to 96L, "dataPort" to dataPort.toLong(), "controlPort" to controlPort.toLong())
@@ -677,6 +683,10 @@ open class RtspHandler(
                             return@mapNotNull null
                         }
                         val dataPort = onBufferedAudioStart()
+                        if (dataPort <= 0) {
+                            Logger.w("buffered audio (type=103) unavailable — ignoring")
+                            return@mapNotNull null
+                        }
                         activeStreamTypes.add(103)
                         Logger.i("buffered audio stream type=103 dataPort=$dataPort")
                         mapOf("type" to 103L, "dataPort" to dataPort.toLong())

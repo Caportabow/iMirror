@@ -458,17 +458,35 @@ class AirPlayReceiver(
             .also { Logger.i("Mirror data server started on port $it") }
     }
 
-    /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
+    /**
+     * Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server.
+     *
+     * Audio must never take the mirror session down with it: this runs inside the SETUP handler, where
+     * an exception would turn the whole response into 400 and make macOS abort video too. So every
+     * failure here — no keys yet, a device without an AAC-ELD decoder, a denied AudioTrack — is caught
+     * and reported as `0 to 0`, which drops the audio stream from the SETUP reply while video proceeds.
+     *
+     * @return (dataPort, controlPort), or (0, 0) when audio could not be started.
+     */
     private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int): Pair<Int, Int> {
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
-            .also { audioServer = it; it.start(scope) }
-        audioPlaying = true
-        emitNowPlaying()
-        Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
-        return server.dataPort to server.controlPort
+        return runCatching {
+            val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
+                .also { audioServer = it; it.start(scope) }
+            audioPlaying = true
+            emitNowPlaying()
+            Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
+            server.dataPort to server.controlPort
+        }.getOrElse { e ->
+            Logger.e("Mirror audio unavailable (ct=$codecType ${sampleRate}Hz x$channels) — continuing video-only", e)
+            audioServer?.stop()
+            audioServer = null
+            audioPlaying = false
+            emitNowPlaying()
+            0 to 0
+        }
     }
 
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */

@@ -13,6 +13,10 @@ import timber.log.Timber
  * HOW: Use Logger.d/i/w/e throughout the codebase instead of Timber or Log directly.
  * Timber must be initialized in MirrorApp.onCreate() before Logger is used.
  *
+ * WHAT REACHES LOGCAT:
+ * - debug builds: everything (Timber.DebugTree, with file/line).
+ * - release builds: WARN and ERROR only (MirrorApp.ReleaseLogTree, tag "iMirror").
+ *
  * Example:
  *   Logger.d("RTSP connection from ${clientIp}")
  *   Logger.i("mDNS service registered: $serviceName")

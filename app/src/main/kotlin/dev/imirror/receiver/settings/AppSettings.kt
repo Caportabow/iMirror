@@ -24,10 +24,12 @@ data class AppSettings(
     // ─── Display ───────────────────────────────────────────────────────────
     /**
      * The name shown in sender pickers (AirPlay menu on Mac, Cast picker in Chrome, etc.).
-     * If empty, the Android device name is used as a fallback.
-     * Validated: max 63 characters, must not be blank after trimming.
+     * Empty (the default) means "use the Android device name", so a fresh install appears under
+     * the user's own TV name instead of a hardcoded one.
+     * Validated: must fit the mDNS label limit together with the RAOP prefix, must not be blank
+     * after trimming.
      */
-    val displayName: String = "Pratik AirPlay",
+    val displayName: String = "",
 
     // ─── Protocols ─────────────────────────────────────────────────────────
     /**

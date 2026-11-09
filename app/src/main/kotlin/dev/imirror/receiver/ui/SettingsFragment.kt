@@ -67,6 +67,9 @@ class SettingsFragment : Fragment() {
     private lateinit var textVersionValue: TextView
     private lateinit var rowReset: LinearLayout
 
+    /** Set when the user turned automatic open on and was sent to grant the overlay permission. */
+    private var pendingAutoOpenEnable = false
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
         inflater.inflate(R.layout.fragment_settings, container, false)
 
@@ -77,6 +80,16 @@ class SettingsFragment : Fragment() {
         setSectionTitles()
         setRowLabels()
         loadAndPopulate()
+    }
+
+    /**
+     * The overlay permission is granted in a different app (system Settings), so the toggle must be
+     * reconciled when the user comes back — otherwise granting the permission left the switch off and
+     * asked for a second tap, and revoking it left the stored preference silently true.
+     */
+    override fun onResume() {
+        super.onResume()
+        refreshAutoOpenRow()
     }
 
     // ─── View Binding ────────────────────────────────────────────────────────
@@ -179,6 +192,31 @@ class SettingsFragment : Fragment() {
     }
 
     /**
+     * Re-reads the auto-open preference and the overlay permission, completing the enable that was
+     * interrupted by the trip to system Settings and keeping the switch honest about both.
+     */
+    private fun refreshAutoOpenRow() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val granted = Settings.canDrawOverlays(requireContext())
+            val settings = settingsRepository.settingsFlow.first()
+
+            if (pendingAutoOpenEnable && granted) {
+                if (!settings.autoOpenOnConnect) {
+                    settingsRepository.update { it.copy(autoOpenOnConnect = true) }
+                }
+                pendingAutoOpenEnable = false
+                setToggle(rowAutoOpen, true)
+                Logger.i("Overlay permission granted — automatic open enabled")
+                return@launch
+            }
+
+            // Permission revoked behind our back: the stored value stays true so it comes back to
+            // life if the user re-grants it, but the switch must not claim it is working now.
+            setToggle(rowAutoOpen, settings.autoOpenOnConnect && granted)
+        }
+    }
+
+    /**
      * Sets up click and toggle listeners for all settings rows.
      * Each listener immediately persists the change via [SettingsRepository.update].
      *
@@ -203,10 +241,12 @@ class SettingsFragment : Fragment() {
                     .setPositiveButton(android.R.string.ok) { _, _ ->
                         val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                             Uri.parse("package:${requireContext().packageName}"))
-                        runCatching { startActivity(intent) }.onFailure {
-                            Toast.makeText(requireContext(), R.string.setting_auto_open_unavailable,
-                                Toast.LENGTH_LONG).show()
-                        }
+                        runCatching { startActivity(intent) }
+                            .onSuccess { pendingAutoOpenEnable = true }
+                            .onFailure {
+                                Toast.makeText(requireContext(), R.string.setting_auto_open_unavailable,
+                                    Toast.LENGTH_LONG).show()
+                            }
                     }
                     .setNegativeButton(android.R.string.cancel, null)
                     .show()

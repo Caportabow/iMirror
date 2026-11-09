@@ -249,8 +249,17 @@ class MainActivity : AppCompatActivity() {
         setKeepScreenOn(true)
     }
 
+    /**
+     * Shows an AirPlay `/photo` payload. The decode happens off the main thread in [PhotoScreen], so
+     * this returns immediately and the overlay switches only once the bitmap is ready.
+     */
     fun showPhotoScreen(photoFrame: PhotoFrame) {
-        if (photoScreen.showPhoto(photoFrame.bytes)) {
+        photoScreen.showPhoto(photoFrame.bytes) shown@{
+            // The decode is asynchronous: by the time it finishes, a newer photo or a video stream may
+            // have taken over. Only push the photo forward if it is still the current state.
+            if (currentPhotoFrame !== photoFrame || currentAirPlayState == ProtocolState.CONNECTED) {
+                return@shown
+            }
             streamingScreen.visibility = View.GONE
             nowPlayingScreen.visibility = View.GONE
             pinScreen.visibility = View.GONE

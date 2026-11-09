@@ -99,8 +99,11 @@ class MirrorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Promote to foreground immediately with a persistent notification
-        startForeground(NOTIFICATION_ID, buildNotification(isRunning = false))
+        // Promote to foreground immediately, but keep the notification describing the receiver's real
+        // state. Repainting it as "stopped" here used to strand the notification: opening the app (or
+        // auto-open bringing it forward) sends a redundant ACTION_START, whose early-return in
+        // startAirPlay means no later state change would restore "Streaming from …".
+        startForeground(NOTIFICATION_ID, currentNotification())
 
         when (intent?.action) {
             ACTION_START   -> serviceScope.launch { startReceivers() }
@@ -377,12 +380,23 @@ class MirrorService : Service() {
             .build()
     }
 
+    /** Last state drawn into the notification — replayed by [currentNotification] on re-promotion. */
+    @Volatile private var notificationRunning = false
+    @Volatile private var notificationSender: String? = null
+
     private fun updateNotification(isRunning: Boolean, streamingSenderName: String? = null) {
-        val contentText = streamingSenderName?.let {
-            getString(R.string.notification_status_streaming, it)
-        }
+        notificationRunning = isRunning
+        notificationSender = streamingSenderName
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildNotification(isRunning, contentText))
+        manager.notify(NOTIFICATION_ID, buildNotification(isRunning, streamingContentText()))
+    }
+
+    /** Rebuilds the notification for the state currently held in [notificationRunning]/[notificationSender]. */
+    private fun currentNotification(): Notification =
+        buildNotification(notificationRunning, streamingContentText())
+
+    private fun streamingContentText(): String? = notificationSender?.let {
+        getString(R.string.notification_status_streaming, it)
     }
 
     // ─── Binder ─────────────────────────────────────────────────────────────

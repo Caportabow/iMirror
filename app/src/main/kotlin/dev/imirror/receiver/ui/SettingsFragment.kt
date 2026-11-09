@@ -36,7 +36,9 @@ import kotlinx.coroutines.launch
  *
  * HOW: Reads current settings from [SettingsRepository] and populates the UI.
  * Each toggle/row saves immediately when changed (no "Save" button needed).
- * Settings changes take effect on the next service restart.
+ * Anything the receiver reads once at startup (AirPlay on/off, device name, resolution, debug
+ * overlay, PIN auth, mirror audio) restarts the receivers so the change applies right away instead
+ * of silently waiting for a later manual restart.
  *
  * Navigation: accessed via the "Settings" item in MainActivity's nav panel.
  */
@@ -186,7 +188,10 @@ class SettingsFragment : Fragment() {
     private fun setupListeners() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
-        setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
+        // Toggling AirPlay only flips the mDNS advertisement and port 7000, so it must restart:
+        // saving alone left the receiver advertising and accepting connections while the switch read
+        // "off". Same for the other startup-only settings.
+        setToggleListener(rowAirPlay)      { enabled -> saveAndRestart { it.copy(airPlayEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowAutoOpen) { enabled ->
@@ -210,8 +215,8 @@ class SettingsFragment : Fragment() {
             }
         }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
-        setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
-        setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
+        setToggleListener(rowDebugOverlay) { enabled -> saveAndRestart { it.copy(showDebugOverlay = enabled) } }
+        setToggleListener(rowForceHighRes) { enabled -> saveAndRestart { it.copy(forceHighResolution = enabled) } }
 
         rowReset.setOnClickListener { resetSettings() }
     }
@@ -240,8 +245,9 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Saves a setting that the AirPlay receiver only reads at startup (mirror-audio, PIN auth), then
-     * restarts the service so the change applies immediately instead of on the next manual restart.
+     * Saves a setting that the AirPlay receiver only reads at startup (AirPlay on/off, device name,
+     * mirror-audio, PIN auth, resolution, debug overlay), then restarts the receivers so the change
+     * applies immediately instead of on the next manual restart.
      */
     private fun saveAndRestart(transform: (AppSettings) -> AppSettings) {
         viewLifecycleOwner.lifecycleScope.launch {
@@ -297,14 +303,16 @@ class SettingsFragment : Fragment() {
                     Toast.makeText(requireContext(), R.string.setting_display_name_truncated,
                         Toast.LENGTH_LONG).show()
                 }
-                save { it.copy(displayName = newName) }
+                // The name is baked into the mDNS registration at startup — re-register on change so
+                // the sender menu shows the new name immediately.
+                saveAndRestart { it.copy(displayName = newName) }
                 textDisplayNameValue.text = newName.ifEmpty {
                     getString(R.string.setting_display_name_system_default)
                 }
                 Logger.i("Display name updated to: '${newName.ifEmpty { "(system default)" }}'")
             }
             .setNeutralButton(R.string.setting_display_name_reset) { _, _ ->
-                save { it.copy(displayName = "") }
+                saveAndRestart { it.copy(displayName = "") }
                 textDisplayNameValue.text = getString(R.string.setting_display_name_system_default)
                 Logger.i("Display name reset to system default")
             }

@@ -74,6 +74,7 @@
     <string name="setting_display_name_system_default">Using system device name</string>
     <string name="setting_display_name_dialog_hint">Leave blank to use system device name</string>
     <string name="setting_display_name_reset">Reset to default</string>
+    <string name="setting_display_name_truncated">Name shortened to fit the 63-byte mDNS limit</string>
     <!-- %1$s = the actual mDNS-registered name (may differ from entered name on collision) -->
     <string name="setting_display_name_collision_note">Registered as: %1$s</string>
     <string name="setting_airplay_enabled">AirPlay Receiver</string>

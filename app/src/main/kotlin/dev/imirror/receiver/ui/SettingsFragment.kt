@@ -23,6 +23,7 @@ import dev.imirror.receiver.R
 import dev.imirror.receiver.settings.AppSettings
 import dev.imirror.receiver.settings.SettingsRepository
 import dev.imirror.receiver.util.Logger
+import dev.imirror.receiver.util.MdnsLabel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -258,7 +259,8 @@ class SettingsFragment : Fragment() {
      *
      * TV UX notes:
      * - The EditText is pre-filled with the current name (empty = system default)
-     * - Max length is enforced to [AppSettings.DISPLAY_NAME_MAX_LENGTH] (63 chars, mDNS limit)
+     * - The dialog limits input to [AppSettings.DISPLAY_NAME_MAX_LENGTH] characters; the saved value
+     *   is then clamped to the mDNS label budget in bytes (see [MdnsLabel])
      * - "OK" saves the new name; "Reset to default" clears to "" (system name); "Cancel" = no-op
      * - Name trimming is applied on save — pure-whitespace names are treated as blank
      *
@@ -287,7 +289,14 @@ class SettingsFragment : Fragment() {
             .setTitle(R.string.setting_display_name)
             .setView(editText)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                val newName = editText.text?.toString()?.trim() ?: ""
+                val typed = editText.text?.toString()?.trim() ?: ""
+                // The dialog limits characters, but mDNS limits bytes (Cyrillic is 2 bytes/char), and
+                // an over-long label fails registration and hides the device. Clamp and say so.
+                val newName = MdnsLabel.clampUtf8(typed, MdnsLabel.MAX_LABEL_BYTES)
+                if (newName.length < typed.length) {
+                    Toast.makeText(requireContext(), R.string.setting_display_name_truncated,
+                        Toast.LENGTH_LONG).show()
+                }
                 save { it.copy(displayName = newName) }
                 textDisplayNameValue.text = newName.ifEmpty {
                     getString(R.string.setting_display_name_system_default)

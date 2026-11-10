@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -172,6 +173,9 @@ class PhotoScreen @JvmOverloads constructor(
     }
 
     private fun recycleCached() {
+        // Detach first: an ImageView still pointing at a recycled Bitmap crashes on the next draw
+        // ("trying to use a recycled bitmap"), which is exactly what a detach/attach cycle would do.
+        imageView.setImageDrawable(null)
         shownBitmap?.takeIf { !it.isRecycled }?.recycle()
         shownBitmap = null
         shownBytes = null

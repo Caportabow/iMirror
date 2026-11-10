@@ -426,19 +426,33 @@ class TestableRtspHandler(
     onPhotoReceived: (ByteArray, PhotoImageType) -> Unit = { _, _ -> },
     onPhotoCleared: () -> Unit = {},
     onMirrorAudioStop: () -> Unit = {},
-    onMirrorVideoStop: () -> Unit = {}
+    onMirrorVideoStop: () -> Unit = {},
+    pinAuthEnabled: Boolean = false,
+    pairingStore: dev.imirror.receiver.airplay.handshake.PairingStore? = null,
+    onShowPin: (String?) -> Unit = {},
+    // PIN pairing reads the persisted Ed25519 identity, which needs a real SharedPreferences.
+    context: android.content.Context = io.mockk.mockk(relaxed = true)
 ) : RtspHandler(
-    context = io.mockk.mockk(relaxed = true),
+    context = context,
     videoSurfaceProvider = { null },
     onStreamingStarted = onStreamingStarted,
     onStreamingStopped = onStreamingStopped,
     onPhotoReceived = onPhotoReceived,
     onPhotoCleared = onPhotoCleared,
     onMirrorAudioStop = onMirrorAudioStop,
-    onMirrorVideoStop = onMirrorVideoStop
+    onMirrorVideoStop = onMirrorVideoStop,
+    pinAuthEnabled = pinAuthEnabled,
+    pairingStore = pairingStore,
+    onShowPin = onShowPin
 ) {
     /** Test seam: mark mirror streams active without driving the full FairPlay SETUP handshake. */
     fun seedActiveStreams(vararg types: Int) { activeStreamTypes.addAll(types.toList()) }
+
+    /** Test seam: whether the receiver considers the controller PIN-paired (gates pair-verify). */
+    fun pinPairedForTest(): Boolean = isPinPaired
+
+    fun handlePairPinStartPublic(req: RtspRequest) = handlePairPinStart(req)
+    fun handlePairSetupPinPublic(req: RtspRequest) = handleLegacyPairSetupPin(req)
 
     fun handleOptionsPublic(req: RtspRequest) = handleOptionsInternal(req)
     fun handleAnnouncePublic(req: RtspRequest) = handleAnnounceInternal(req)

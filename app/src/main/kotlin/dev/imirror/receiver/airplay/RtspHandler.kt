@@ -84,6 +84,9 @@ open class RtspHandler(
     // flow (an accepted pair-verify means "already trusted, no PIN needed").
     @Volatile private var pinPaired = false
 
+    /** Test seam: whether a controller has proven knowledge of the PIN on this receiver. */
+    protected val isPinPaired: Boolean get() = pinPaired
+
     /** Last volume the sender set (AirPlay dB); returned to GET_PARAMETER volume queries. */
     @Volatile private var currentVolume: Float = 0f
 
@@ -524,20 +527,31 @@ open class RtspHandler(
      * POST /pair-pin-start — macOS asks the receiver to begin PIN pairing and display the code. We
      * generate + show the PIN and prime the SRP session, then reply 200; the SRP exchange follows on
      * /pair-setup-pin. (This precedes pair-setup in the AirPlay PIN flow — see the logs.)
+     *
+     * Deliberately NOT gated by the attempt lockout: this is the request that mints a fresh PIN, and a
+     * fresh random PIN also resets the attempt budget (see [newSrpSession]). Blocking it is what used
+     * to brick PIN pairing permanently — every following attempt got 470 and even a correct code was
+     * rejected, with no way out short of wiping the app's data.
      */
-    private fun handlePairPinStart(request: RtspRequest): RtspResponse {
+    open fun handlePairPinStart(request: RtspRequest): RtspResponse {
         if (!pinAuthEnabled) return handleUnknownInternal(request)
-        if ((pairingStore?.failedAttempts() ?: 0) >= MAX_PAIR_ATTEMPTS) {
-            Logger.w("pair-pin-start blocked — PIN auth locked ($MAX_PAIR_ATTEMPTS failed attempts)")
-            return RtspResponse(470, "Connection Authorization Required", protocol = request.responseProtocol())
-        }
-        newSrpSession()
+        newSrpSession(resetAttempts = true)
         Logger.i("pair-pin-start — PIN shown, SRP session primed")
         return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
 
-    /** Generates a fresh 4-digit PIN, shows it on the TV, and primes the legacy SRP session. */
-    private fun newSrpSession() {
+    /**
+     * Generates a fresh 4-digit PIN, shows it on the TV, and primes the legacy SRP session.
+     *
+     * [resetAttempts] is set by /pair-pin-start — an explicit "start pairing" from the sender, which
+     * is what the user triggers from the AirPlay menu. The budget is then per PIN rather than per
+     * receiver lifetime: a persistent counter is what used to brick PIN pairing for good (every later
+     * attempt got 470, even with the correct code, until the app's data was wiped). A step-1 request
+     * that arrives on its own does NOT reset the budget, so a sender cannot grind codes by simply
+     * re-posting it.
+     */
+    private fun newSrpSession(resetAttempts: Boolean = false) {
+        if (resetAttempts) pairingStore?.resetFailedAttempts()
         val pin = "%0${PIN_DIGITS}d".format(java.security.SecureRandom().nextInt(PIN_SPACE))
         onShowPin(pin)
         legacyPin = dev.imirror.receiver.airplay.handshake.LegacyPairSetupPin(pin, PairingKeys.get(context).edPublic)
@@ -545,10 +559,12 @@ open class RtspHandler(
 
     /**
      * POST /pair-setup-pin — the legacy AirPlay plist SRP exchange. Step 1 ({method,user}) returns
-     * {pk,salt}; step 2 ({pk,proof}) verifies the PIN and returns {proof}. On success the controller
-     * is allowed past pair-verify (→ streaming). Bounded by the failed-attempt lockout.
+     * {pk,salt}; step 2 ({pk,proof}) verifies the PIN and returns {proof}; step 3 ({epk,authTag}) is
+     * the optional AES-GCM exchange of long-term keys. The controller is allowed past pair-verify as
+     * soon as step 2 proves it knows the PIN — step 3 only carries identity and must not gate
+     * streaming. Bounded by the per-PIN failed-attempt lockout.
      */
-    private fun handleLegacyPairSetupPin(request: RtspRequest): RtspResponse {
+    open fun handleLegacyPairSetupPin(request: RtspRequest): RtspResponse {
         if (!pinAuthEnabled) return handleUnknownInternal(request)
         if ((pairingStore?.failedAttempts() ?: 0) >= MAX_PAIR_ATTEMPTS) {
             Logger.w("pair-setup-pin blocked — PIN auth locked ($MAX_PAIR_ATTEMPTS failed attempts)")
@@ -565,9 +581,17 @@ open class RtspHandler(
                 onShowPin(null); legacyPin = null
                 return RtspResponse(470, "Connection Authorization Required", protocol = request.responseProtocol())
             }
+            if (result.pinVerified) {
+                // The proof over the PIN checked out — that IS the access-control decision. Accept the
+                // controller now and hide the code; keep [legacyPin] so a sender that follows up with
+                // the optional step-3 key exchange is not met with a freshly generated PIN.
+                pinPaired = true
+                pairingStore?.resetFailedAttempts()
+                onShowPin(null)
+                Logger.i("PIN verified — pair-verify now permitted (step-3 key exchange optional)")
+            }
             if (result.complete) {
                 pairingStore?.resetFailedAttempts()   // legitimate pairing clears the lockout counter
-                pinPaired = true                       // now allow pair-verify → streaming proceeds
                 onShowPin(null); legacyPin = null
                 Logger.i("PIN pairing complete — pair-verify now permitted")
             }
@@ -1035,7 +1059,8 @@ open class RtspHandler(
         // SRP PIN access control. macOS's AirPlay code-entry field is exactly 4 digits, so the PIN
         // must be 4 digits to be enterable. A 4-digit space is low-entropy, so the load-bearing
         // defense is the MAX_PAIR_ATTEMPTS lockout below (uniform random + hard attempt cap, NOT
-        // length). The PIN is still uniformly random — no biased truncation.
+        // length). The budget is PER PIN: /pair-pin-start mints a new random PIN and resets it, so a
+        // user is never locked out of the feature itself — only out of guessing one code.
         private const val PIN_DIGITS = 4
         private const val PIN_SPACE = 10_000        // 10^PIN_DIGITS
         private const val MAX_PAIR_ATTEMPTS = 10

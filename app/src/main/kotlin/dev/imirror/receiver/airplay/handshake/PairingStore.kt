@@ -27,8 +27,9 @@ class PairingStore(context: Context) {
 
     // ─── Brute-force protection (HAP max-tries) ──────────────────────────────
     // A 4–8 digit PIN is low-entropy, so the real defence against guessing is bounding the number of
-    // failed pair-setup attempts. The count is persistent (survives reconnect/restart) and only a
-    // successful pairing resets it, mirroring HAP's "lock out until reset" behaviour.
+    // failed proofs of the CURRENT code. The budget is per PIN: the counter is cleared whenever a new
+    // PIN is minted, so a user who mistyped a few codes can always recover by starting a new pairing,
+    // while a persistent counter would keep rejecting a correct code forever.
     fun failedAttempts(): Int = prefs.getInt(KEY_FAILS, 0)
 
     fun recordFailedAttempt(): Int {

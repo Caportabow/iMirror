@@ -35,7 +35,7 @@ object ServiceController {
     fun start(context: Context) {
         Logger.i("ServiceController: start()")
         val intent = buildIntent(context, MirrorService.ACTION_START)
-        startForegroundServiceCompat(context, intent)
+        send(context, intent)
     }
 
     /**
@@ -48,8 +48,14 @@ object ServiceController {
      */
     fun stop(context: Context) {
         Logger.i("ServiceController: stop()")
-        val intent = buildIntent(context, MirrorService.ACTION_STOP)
-        context.startService(intent)
+        // stopService is the right primitive here: it tears the service down through onDestroy (which
+        // releases the receivers and closes the RTSP session), works whether or not the service is
+        // running, and needs no foreground start. The old startService(ACTION_STOP) could throw
+        // IllegalStateException on API 26+ — typically from MainActivity.onDestroy when the app was
+        // already in the background — which crashed the app on exit.
+        val intent = Intent(context, MirrorService::class.java)
+        runCatching { context.stopService(intent) }
+            .onFailure { Logger.e("ServiceController: stopService failed", it) }
     }
 
     /**
@@ -67,7 +73,19 @@ object ServiceController {
     fun restart(context: Context) {
         Logger.i("ServiceController: restart()")
         val intent = buildIntent(context, MirrorService.ACTION_RESTART)
-        startForegroundServiceCompat(context, intent)
+        send(context, intent)
+    }
+
+    /**
+     * Delivers a start/restart action to the service.
+     *
+     * Starting a foreground service from the background is restricted on Android 12+ and throws
+     * [android.app.ForegroundServiceStartNotAllowedException]; losing a settings-driven restart must
+     * not take the app down with it, so failures are logged instead.
+     */
+    private fun send(context: Context, intent: Intent) {
+        runCatching { startForegroundServiceCompat(context, intent) }
+            .onFailure { Logger.e("ServiceController: ${intent.action} delivery failed", it) }
     }
 
     /**

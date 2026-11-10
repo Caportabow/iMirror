@@ -2,6 +2,7 @@ package dev.imirror.receiver.airplay
 
 import dev.imirror.receiver.util.Logger
 import java.io.InputStream
+import java.util.TreeMap
 
 /**
  * RtspRequestReader parses RTSP/HTTP-style requests from the AirPlay control socket.
@@ -19,8 +20,22 @@ internal class RtspRequestReader(
      * Returns null on clean EOF, malformed input, or payloads over the configured limits.
      */
     fun read(inputStream: InputStream): RtspRequest? {
-        val requestLine = readLine(inputStream) ?: return null
-        if (requestLine.isBlank()) return read(inputStream)
+        // Skip leading blank lines (clients sometimes flush a stray CRLF between requests) with a
+        // loop, not recursion — a noisy peer sending a run of CRLFs would otherwise overflow the
+        // stack, and StackOverflowError is an Error, so the caller's catch(Exception) misses it.
+        var requestLine: String
+        var blankLines = 0
+        while (true) {
+            val line = readLine(inputStream) ?: return null
+            if (line.isNotBlank()) {
+                requestLine = line
+                break
+            }
+            if (++blankLines > MAX_LEADING_BLANK_LINES) {
+                Logger.w("RTSP request started with $blankLines blank lines — rejecting")
+                return null
+            }
+        }
 
         val parts = requestLine.split(" ")
         if (parts.size < 3) {
@@ -45,7 +60,9 @@ internal class RtspRequestReader(
     }
 
     private fun readHeaders(inputStream: InputStream, requestLineBytes: Int): Map<String, String>? {
-        val headers = mutableMapOf<String, String>()
+        // RTSP header names are case-insensitive (RFC 2326 §4), so lookups must not depend on the
+        // sender's capitalisation. TreeMap keeps the comparison consistent for every later lookup.
+        val headers = TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER)
         var totalBytes = requestLineBytes
 
         while (true) {
@@ -72,7 +89,7 @@ internal class RtspRequestReader(
         uri: String,
         headers: Map<String, String>
     ): ByteArray? {
-        val contentLength = headers["Content-Length"]?.toIntOrNull() ?: 0
+        val contentLength = headers.header("Content-Length")?.toIntOrNull() ?: 0
         val bodyLimit = if (method == "PUT" && uri.substringBefore("?") == PhotoHandler.PHOTO_PATH) {
             maxPhotoBytes
         } else {
@@ -93,6 +110,11 @@ internal class RtspRequestReader(
             read += n
         }
         return buf
+    }
+
+    private companion object {
+        /** How many blank lines a client may send before a request before we give up on it. */
+        const val MAX_LEADING_BLANK_LINES = 10
     }
 
     private fun readLine(inputStream: InputStream): String? {

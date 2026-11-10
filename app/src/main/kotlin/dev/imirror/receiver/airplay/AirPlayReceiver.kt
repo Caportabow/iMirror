@@ -193,6 +193,19 @@ class AirPlayReceiver(
     /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
     fun isRemoteControlAvailable(): Boolean = dacpClient.isAvailable
 
+    /**
+     * Re-attaches URL-mode video playback to the Activity's current Surface.
+     *
+     * Mirroring recovers by itself — [MirrorStreamServer] asks the provider for the Surface on every
+     * frame — but [AirPlayVideoPlayer] hands the Surface to MediaPlayer once, so after the SurfaceView
+     * recreates its Surface (returning from background, configuration change) playback would keep
+     * rendering into a destroyed Surface and the screen would stay black. No-op unless a URL video is
+     * loaded.
+     */
+    fun attachVideoSurface() {
+        urlVideoPlayer?.attachSurface()
+    }
+
     // ─── Private: startup ────────────────────────────────────────────────────
 
     private fun startTimingHandler() {
@@ -366,7 +379,7 @@ class AirPlayReceiver(
     }
 
     /**
-     * Opens a UDP socket on [AUDIO_RTP_PORT] and feeds every received packet to
+     * Opens a UDP socket on [RtspHandler.AUDIO_RTP_PORT] and feeds every received packet to
      * [AudioPlayer.playAudioPacket].
      *
      * WHY UDP: AirPlay audio is sent as RTP over UDP — low latency is more important
@@ -378,9 +391,9 @@ class AirPlayReceiver(
     private fun startAudioUdpReceiver() {
         scope.launch(Dispatchers.IO) {
             try {
-                val socket = DatagramSocket(AUDIO_RTP_PORT)
+                val socket = DatagramSocket(RtspHandler.AUDIO_RTP_PORT)
                 audioSocket = socket
-                Logger.i("Audio UDP receiver listening on port $AUDIO_RTP_PORT")
+                Logger.i("Audio UDP receiver listening on port ${RtspHandler.AUDIO_RTP_PORT}")
 
                 val buf    = ByteArray(MAX_AUDIO_PACKET_BYTES)
                 val packet = DatagramPacket(buf, buf.size)
@@ -458,17 +471,35 @@ class AirPlayReceiver(
             .also { Logger.i("Mirror data server started on port $it") }
     }
 
-    /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
+    /**
+     * Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server.
+     *
+     * Audio must never take the mirror session down with it: this runs inside the SETUP handler, where
+     * an exception would turn the whole response into 400 and make macOS abort video too. So every
+     * failure here — no keys yet, a device without an AAC-ELD decoder, a denied AudioTrack — is caught
+     * and reported as `0 to 0`, which drops the audio stream from the SETUP reply while video proceeds.
+     *
+     * @return (dataPort, controlPort), or (0, 0) when audio could not be started.
+     */
     private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int): Pair<Int, Int> {
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
-            .also { audioServer = it; it.start(scope) }
-        audioPlaying = true
-        emitNowPlaying()
-        Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
-        return server.dataPort to server.controlPort
+        return runCatching {
+            val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
+                .also { audioServer = it; it.start(scope) }
+            audioPlaying = true
+            emitNowPlaying()
+            Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
+            server.dataPort to server.controlPort
+        }.getOrElse { e ->
+            Logger.e("Mirror audio unavailable (ct=$codecType ${sampleRate}Hz x$channels) — continuing video-only", e)
+            audioServer?.stop()
+            audioServer = null
+            audioPlaying = false
+            emitNowPlaying()
+            0 to 0
+        }
     }
 
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */
@@ -601,13 +632,6 @@ class AirPlayReceiver(
         // Real resolution is encoded in the H.264 SPS NAL unit.
         private const val DEFAULT_VIDEO_WIDTH  = 1920
         private const val DEFAULT_VIDEO_HEIGHT = 1080
-
-        /**
-         * UDP port for receiving audio RTP packets.
-         * Advertised in the RTSP SETUP response so the sender knows where to send audio.
-         * Must not conflict with the RTSP port (7000) or timing port ([TimingHandler.TIMING_PORT]).
-         */
-        internal const val AUDIO_RTP_PORT = 6001
 
         /**
          * Maximum UDP audio packet size in bytes.

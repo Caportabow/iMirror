@@ -8,7 +8,9 @@ package dev.imirror.receiver.airplay
  *
  * @param method  The RTSP method (e.g., "OPTIONS", "ANNOUNCE", "RECORD")
  * @param uri     The request URI (e.g., "rtsp://192.168.1.1/imirror")
- * @param headers All headers as a key→value map (keys are case-sensitive per RFC 2326)
+ * @param headers All headers as a key→value map. Header names are case-insensitive
+ *                (RFC 2326 §4) — prefer [header] over a direct `get`, since callers may pass
+ *                plain maps with different capitalisation.
  * @param body    The request body text (empty string if Content-Length was 0 or absent)
  */
 data class RtspRequest(
@@ -44,6 +46,16 @@ data class RtspResponse(
     val contentType: String? = null,
     val protocol: String = "RTSP/1.0"
 )
+
+/**
+ * Case-insensitive RTSP header lookup.
+ *
+ * RTSP header names are case-insensitive (RFC 2326 §4), so `content-length:` must work exactly like
+ * `Content-Length:`. Requests built by the socket parser arrive in a case-insensitive map already,
+ * but handlers are also called directly (tests, callbacks) with plain `mapOf` — this covers both.
+ */
+fun Map<String, String>.header(name: String): String? =
+    this[name] ?: entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
 
 /** Effective wire body: prefers binary [RtspResponse.bodyBytes], else UTF-8 of [RtspResponse.body]. */
 fun RtspResponse.wireBody(): ByteArray = bodyBytes ?: body.toByteArray(Charsets.UTF_8)

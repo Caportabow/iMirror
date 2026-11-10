@@ -24,10 +24,12 @@ data class AppSettings(
     // ─── Display ───────────────────────────────────────────────────────────
     /**
      * The name shown in sender pickers (AirPlay menu on Mac, Cast picker in Chrome, etc.).
-     * If empty, the Android device name is used as a fallback.
-     * Validated: max 63 characters, must not be blank after trimming.
+     * Empty (the default) means "use the Android device name", so a fresh install appears under
+     * the user's own TV name instead of a hardcoded one.
+     * Validated: must fit the mDNS label limit together with the RAOP prefix, must not be blank
+     * after trimming.
      */
-    val displayName: String = "Pratik AirPlay",
+    val displayName: String = "",
 
     // ─── Protocols ─────────────────────────────────────────────────────────
     /**
@@ -74,10 +76,17 @@ data class AppSettings(
     val forceHighResolution: Boolean = false,
 
     /**
-     * When true, accept the mirroring audio stream (type 96, AAC-ELD). EXPERIMENTAL: macOS uses
-     * realtime audio clock-sync (RTCP) that isn't fully implemented yet, which can make macOS tear
-     * the whole mirror session down after a couple of seconds — so this defaults OFF to keep video
-     * mirroring rock-solid. Turn on to experiment with audio.
+     * When true (the default), accept the mirroring audio stream (type 96, AAC-ELD / ALAC) so the
+     * Mac's sound plays on the TV.
+     *
+     * The KDoc used to claim this defaulted OFF because audio could tear the whole session down. In
+     * practice the mirror audio pipeline is isolated from the video one: its sockets, decoder and
+     * AudioTrack live in [dev.imirror.receiver.airplay.handshake.AudioStreamServer], a start failure
+     * drops the audio stream from the SETUP reply instead of failing the SETUP, and mirroring never
+     * shows the audio-only now-playing card. Turning audio off therefore only costs sound; it never
+     * changes whether video mirroring works. macOS's realtime clock sync (RTCP) is still only partly
+     * implemented, so badly jittered audio can lag the picture — a playback-quality issue, not a
+     * session-stability one.
      */
     val mirrorAudioEnabled: Boolean = true
 ) {

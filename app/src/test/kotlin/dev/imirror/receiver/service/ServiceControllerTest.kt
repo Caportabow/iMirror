@@ -22,7 +22,7 @@ import org.robolectric.annotation.Config
  *
  * WHAT WE TEST:
  * - [ServiceController.start] dispatches ACTION_START to MirrorService
- * - [ServiceController.stop] dispatches ACTION_STOP to MirrorService
+ * - [ServiceController.stop] tears the service down with Context.stopService
  * - [ServiceController.restart] dispatches ACTION_RESTART to MirrorService
  * - Intent target component is MirrorService
  *
@@ -57,14 +57,17 @@ class ServiceControllerTest {
     }
 
     @Test
-    fun `stop() sends ACTION_STOP intent via startService`() {
+    fun `stop() stops the service instead of starting it`() {
         val stopSlot = slot<Intent>()
-        every { context.startService(capture(stopSlot)) } returns mockk()
+        every { context.stopService(capture(stopSlot)) } returns true
 
         ServiceController.stop(context)
 
-        verify { context.startService(any()) }
-        assertEquals(MirrorService.ACTION_STOP, stopSlot.captured.action)
+        verify { context.stopService(any()) }
+        assertEquals(MirrorService::class.java.name, stopSlot.captured.component?.className)
+        // Must not start the service: ACTION_STOP via startService could throw on API 26+, which is
+        // how stopping from a backgrounded Activity crashed the app on exit.
+        verify(exactly = 0) { context.startForegroundService(any()) }
     }
 
     @Test

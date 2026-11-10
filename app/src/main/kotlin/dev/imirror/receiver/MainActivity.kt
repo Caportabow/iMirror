@@ -82,6 +82,9 @@ class MainActivity : AppCompatActivity() {
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
             service?.setVideoSurfaceProvider { getVideoSurface() }
+            // The Surface may already exist if the Activity rebound after the SurfaceView was
+            // created — give MediaPlayer-based URL playback the live Surface immediately.
+            service?.refreshVideoSurface()
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
@@ -167,6 +170,9 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setupOverlayScreens() {
         streamingScreen = StreamingScreen(this)
+        // A SurfaceView recreates its Surface when the Activity returns to the foreground; URL video
+        // holds the old one inside MediaPlayer, so tell the service to re-attach it.
+        streamingScreen.onSurfaceAvailable = { service?.refreshVideoSurface() }
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this)
         pinScreen = PinScreen(this)

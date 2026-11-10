@@ -78,6 +78,12 @@ class MirrorService : Service() {
     private val _pairingPin = MutableStateFlow<String?>(null)
     val pairingPin: StateFlow<String?> = _pairingPin.asStateFlow()
 
+    // The name mDNS actually registered, or null when nothing is advertised. NsdManager resolves a
+    // name collision by registering "Name (2)" — that suffix, not the requested name, is what senders
+    // show in their picker, so the UI needs the real value.
+    private val _actualDisplayName = MutableStateFlow<String?>(null)
+    val actualDisplayName: StateFlow<String?> = _actualDisplayName.asStateFlow()
+
     // Surface provider — supplied by MainActivity after binding (Sprint 5).
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
@@ -144,6 +150,17 @@ class MirrorService : Service() {
      */
     fun setVideoSurfaceProvider(provider: () -> Surface?) {
         videoSurfaceProvider = provider
+    }
+
+    /**
+     * Hands the current Surface to media that caches it (AirPlay URL video via MediaPlayer).
+     *
+     * The mirror pipeline re-reads the provider for every frame, so it needs nothing here. Called by
+     * [MainActivity] when its SurfaceView creates a new Surface and right after binding, so returning
+     * from the background does not leave URL playback rendering into a destroyed Surface.
+     */
+    fun refreshVideoSurface() {
+        airPlayReceiver?.attachVideoSurface()
     }
 
     /**
@@ -246,6 +263,9 @@ class MirrorService : Service() {
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
             videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            onActualNameRegistered = { actualName ->
+                _actualDisplayName.value = actualName
+            },
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
@@ -311,6 +331,7 @@ class MirrorService : Service() {
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null
+        _actualDisplayName.value = null
     }
 
     // ─── Notification ────────────────────────────────────────────────────────

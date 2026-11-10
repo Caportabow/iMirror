@@ -21,10 +21,12 @@ import dev.imirror.receiver.service.Protocol
 import dev.imirror.receiver.service.ProtocolState
 import dev.imirror.receiver.service.ServiceController
 import dev.imirror.receiver.service.ServiceState
+import dev.imirror.receiver.settings.SettingsRepository
 import dev.imirror.receiver.util.Logger
 import dev.imirror.receiver.util.NetworkUtils
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -147,11 +149,27 @@ class HomeFragment : Fragment() {
     }
 
     /**
-     * Shows the device's AirPlay name on the HomeScreen so the user knows
-     * what to look for in their sender's picker.
+     * Shows the AirPlay name on the HomeScreen so the user knows what to look for in their sender's
+     * picker.
+     *
+     * [actualName] is the name mDNS really registered — NsdManager appends " (2)" when another
+     * device already uses the requested name, and that suffixed name is what the sender's picker
+     * shows. When it is unknown (nothing advertised yet), fall back to the configured name, then to
+     * the Android device name. The old implementation always showed the system name, so a custom
+     * display name — and any collision suffix — was invisible here.
      */
-    private fun showDeviceName() {
-        val name = NetworkUtils.getDeviceName(requireContext())
+    private fun showDeviceName(actualName: String? = null) {
+        if (actualName != null) {
+            renderDeviceName(actualName)
+            return
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            val configured = SettingsRepository(requireContext()).settingsFlow.first().effectiveDisplayName
+            renderDeviceName(configured.ifBlank { NetworkUtils.getDeviceName(requireContext()) })
+        }
+    }
+
+    private fun renderDeviceName(name: String) {
         textDeviceName.text = getString(R.string.home_device_visible_as, name)
     }
 
@@ -173,6 +191,9 @@ class HomeFragment : Fragment() {
         }
         stateJobs += viewLifecycleOwner.lifecycleScope.launch {
             svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state) }
+        }
+        stateJobs += viewLifecycleOwner.lifecycleScope.launch {
+            svc.actualDisplayName.collectLatest { actualName -> showDeviceName(actualName) }
         }
     }
 

@@ -19,7 +19,7 @@ import java.util.UUID
  *
  * Example:
  *   val name = NetworkUtils.getDeviceName(context)   // "My Android TV"
- *   val mac  = NetworkUtils.getMacAddress()           // "aa:bb:cc:dd:ee:ff"
+ *   val mac  = NetworkUtils.getMacAddress(context)    // "aa:bb:cc:dd:ee:ff"
  *   val uuid = NetworkUtils.getPersistentUuid(context) // stable UUID per device
  */
 object NetworkUtils {
@@ -53,38 +53,61 @@ object NetworkUtils {
     }
 
     /**
-     * Returns the device's Wi-Fi or Ethernet MAC address.
+     * Returns the device's stable Wi-Fi or Ethernet MAC address.
      *
-     * The MAC address is used as the `deviceid` in AirPlay mDNS TXT records.
-     * It uniquely identifies this receiver to macOS senders.
+     * The MAC address is used as the `deviceid` in AirPlay mDNS TXT records and in the RAOP service
+     * name, so macOS treats changes to it as a DIFFERENT receiver (duplicate entries in the AirPlay
+     * menu). Android lists whatever interfaces happen to be up: on a TV with Ethernet, Wi-Fi and
+     * Wi-Fi Direct that includes `p2p0`/`dummy0`, and enumeration order is not stable. So the address
+     * is picked once from the best real interface and persisted; later interface churn cannot change
+     * the identity of an already-configured receiver.
      *
-     * Tries Wi-Fi first (most TVs are Wi-Fi), then falls back to any available
-     * non-loopback interface, then uses a fake address as last resort.
+     * Preference order: `wlan*` (most TVs are Wi-Fi), then `eth*`, then any other physical interface.
+     * Virtual interfaces (Wi-Fi Direct, cellular, VPN, dummy, tunnels) are ignored.
      *
-     * NOTE: On Android 10+, direct MAC access is restricted. We use NetworkInterface
+     * NOTE: On Android 10+, direct MAC access is restricted. We use [NetworkInterface]
      * instead of WifiManager.getConnectionInfo() which is deprecated.
      *
+     * @param context Android context (needed to persist the chosen address)
      * @return MAC address in "aa:bb:cc:dd:ee:ff" format (lowercase, colon-separated).
      */
-    fun getMacAddress(): String {
-        return try {
-            // Iterate all network interfaces to find the Wi-Fi or Ethernet interface
-            val interfaces = NetworkInterface.getNetworkInterfaces()?.toList() ?: emptyList()
+    fun getMacAddress(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.getString(PREF_KEY_DEVICE_MAC, null)?.takeIf { it.isNotBlank() }?.let { return it }
 
-            val mac = interfaces
-                .filter { !it.isLoopback && it.isUp && it.hardwareAddress != null }
-                .mapNotNull { iface ->
-                    iface.hardwareAddress?.let { hwAddr ->
-                        hwAddr.joinToString(":") { byte -> "%02x".format(byte) }
-                    }
-                }
-                .firstOrNull()
-
-            mac ?: FALLBACK_MAC_ADDRESS
-        } catch (e: Exception) {
-            Timber.w(e, "Could not read MAC address — using fallback")
-            FALLBACK_MAC_ADDRESS
+        val detected = detectMacAddress()
+        if (detected != null) {
+            // Persist only a real address: the fallback must never become the permanent identity.
+            runCatching { prefs.edit().putString(PREF_KEY_DEVICE_MAC, detected).apply() }
+                .onFailure { Timber.w(it, "Could not persist MAC address") }
+            return detected
         }
+        return FALLBACK_MAC_ADDRESS
+    }
+
+    /** Best hardware address among the currently up physical interfaces, or null if none. */
+    private fun detectMacAddress(): String? = try {
+        NetworkInterface.getNetworkInterfaces()?.toList()
+            ?.filter { iface ->
+                !iface.isLoopback &&
+                    iface.isUp &&
+                    iface.hardwareAddress?.any { it.toInt() != 0 } == true &&
+                    VIRTUAL_INTERFACE_PREFIXES.none { iface.name.startsWith(it) }
+            }
+            ?.sortedBy { interfaceRank(it.name) }
+            ?.mapNotNull { iface ->
+                iface.hardwareAddress?.joinToString(":") { byte -> "%02x".format(byte) }
+            }
+            ?.firstOrNull()
+    } catch (e: Exception) {
+        Timber.w(e, "Could not read MAC address — using fallback")
+        null
+    }
+
+    private fun interfaceRank(name: String): Int = when {
+        name.startsWith("wlan") -> 0
+        name.startsWith("eth") -> 1
+        else -> 2
     }
 
     /**
@@ -127,4 +150,10 @@ object NetworkUtils {
     private const val FALLBACK_MAC_ADDRESS = "aa:bb:cc:dd:ee:ff"
     private const val PREFS_NAME = "imirror_prefs"
     private const val PREF_KEY_DEVICE_UUID = "imirror_device_uuid"
+    private const val PREF_KEY_DEVICE_MAC = "imirror_device_mac"
+
+    /** Interface name prefixes that never carry the receiver's LAN identity. */
+    private val VIRTUAL_INTERFACE_PREFIXES = listOf(
+        "p2p", "dummy", "rmnet", "tun", "sit", "ip6tnl", "gre", "ppp", "v4-", "ifb"
+    )
 }

@@ -226,7 +226,7 @@ open class RtspHandler(
         try {
             while (running && !socket.isClosed) {
                 val request = requestReader.read(inputStream) ?: break
-                currentCSeq = request.headers["CSeq"]?.toIntOrNull() ?: 0
+                currentCSeq = request.headers.header("CSeq")?.toIntOrNull() ?: 0
                 val response = routeRequest(request)
                 sendResponse(outputStream, response)
 
@@ -274,7 +274,7 @@ open class RtspHandler(
         Logger.d("RTSP ${request.method} ${request.uri}")
         // Senders attach their DACP reverse-control identity to most requests — capture it so the TV
         // remote can drive playback (DacpClient dedups, so this is cheap to call repeatedly).
-        request.headers["Active-Remote"]?.let { onRemoteControlInfo(request.headers["DACP-ID"], it) }
+        request.headers.header("Active-Remote")?.let { onRemoteControlInfo(request.headers.header("DACP-ID"), it) }
         return when (request.method) {
             "OPTIONS"       -> handleOptionsInternal(request)
             "ANNOUNCE"      -> handleAnnounceInternal(request)
@@ -421,7 +421,7 @@ open class RtspHandler(
     /** GET /server-info — legacy XML plist of receiver identity for AirPlay video senders. */
     private fun handleServerInfo(request: RtspRequest): RtspResponse {
         val info = mapOf(
-            "deviceid" to dev.imirror.receiver.util.NetworkUtils.getMacAddress(),
+            "deviceid" to dev.imirror.receiver.util.NetworkUtils.getMacAddress(context),
             "features" to 0x1E5A7FFFF7L,
             "model" to "AppleTV5,3",
             "protovers" to "1.1",
@@ -734,7 +734,7 @@ open class RtspHandler(
             return RtspResponse(statusCode = 400, statusMessage = "Bad Request")
         }
 
-        currentSession = parsed.copy(senderName = extractSenderName(request.headers["User-Agent"]))
+        currentSession = parsed.copy(senderName = extractSenderName(request.headers.header("User-Agent")))
         val s = currentSession!!
         Logger.i("Session: hasVideo=${s.hasVideo} hasAudio=${s.hasAudio} " +
                  "codec=${s.audioCodec} encrypted=${s.isAudioEncrypted} sender='${s.senderName}'")
@@ -759,10 +759,7 @@ open class RtspHandler(
         val transport = if (isVideoSetup) {
             "RTP/AVP/TCP;unicast;interleaved=0-1"
         } else {
-            "RTP/AVP/UDP;unicast;" +
-            "client_port=$AUDIO_RTP_PORT-${AUDIO_RTP_PORT + 1};" +
-            "server_port=$AUDIO_RTP_PORT-${AUDIO_RTP_PORT + 1};" +
-            "timing-port=${TimingHandler.TIMING_PORT}"
+            buildAudioTransport(request)
         }
 
         Logger.d("SETUP #$setupCount — transport: $transport")
@@ -771,6 +768,45 @@ open class RtspHandler(
             statusMessage = "OK",
             headers = mapOf("Session" to SESSION_ID, "Transport" to transport)
         )
+    }
+
+    /**
+     * Builds the UDP Transport header for the audio SETUP (RAOP audio or mirror audio).
+     *
+     * WHY the two port pairs are not interchangeable (RFC 2326 §12.39 / RFC 3550 §11):
+     *  - `client_port` names the SENDER's RTP/RTCP sockets. We echo the pair it requested in its own
+     *    SETUP; inventing a number there makes a strict sender drop the stream.
+     *  - `server_port` names OUR sockets: [AUDIO_RTP_PORT] (bound by AirPlayReceiver) and
+     *    [AUDIO_RTCP_PORT]. They must stay clear of [TimingHandler.TIMING_PORT] — the old reply reused
+     *    6001-6002 for both sides, so audio RTCP was delivered to the NTP timing handler.
+     *
+     * The RTCP port is advertised but not bound: we do not consume RTCP reports yet, and senders
+     * tolerate that (the packets are simply dropped) far better than having them parsed as NTP.
+     */
+    private fun buildAudioTransport(request: RtspRequest): String {
+        val clientPorts = parseClientPorts(request.headers.header("Transport"))
+        return buildString {
+            append("RTP/AVP/UDP;unicast")
+            if (clientPorts != null) {
+                append(";client_port=").append(clientPorts.first).append('-').append(clientPorts.second)
+            }
+            append(";server_port=").append(AUDIO_RTP_PORT).append('-').append(AUDIO_RTCP_PORT)
+            append(";timing-port=").append(TimingHandler.TIMING_PORT)
+        }
+    }
+
+    /**
+     * Extracts the sender's RTP/RTCP pair from a SETUP `Transport` header, e.g.
+     * `RTP/AVP/UDP;unicast;client_port=53552-53553`. Returns null when the sender did not ask for
+     * ports (then we simply omit `client_port` from the reply) or the pair is out of range.
+     */
+    private fun parseClientPorts(transport: String?): Pair<Int, Int>? {
+        val match = transport?.let { CLIENT_PORT.find(it) } ?: return null
+        val rtp = match.groupValues[1].toIntOrNull() ?: return null
+        val explicitRtcp = match.groupValues.getOrNull(2)?.takeIf { it.isNotEmpty() }?.toIntOrNull()
+        val rtcp = explicitRtcp ?: (rtp + 1)
+        if (rtp !in 1..65535 || rtcp !in 1..65535) return null
+        return rtp to rtcp
     }
 
     /** Handles RECORD — macOS/iOS says start sending media now. */
@@ -866,7 +902,7 @@ open class RtspHandler(
 
     private fun handleSetParameter(request: RtspRequest): RtspResponse {
         val body = request.body
-        val contentType = request.headers["Content-Type"]?.lowercase() ?: ""
+        val contentType = request.headers.header("Content-Type")?.lowercase() ?: ""
         // Text bodies carry "volume: <dB>"; binary bodies carry DMAP now-playing metadata or artwork.
         when {
             body.startsWith("volume") -> {
@@ -920,7 +956,7 @@ open class RtspHandler(
 
         return when (val validation = PhotoHandler.validatePhoto(
             request.bodyBytes,
-            request.headers["Content-Type"]
+            request.headers.header("Content-Type")
         )) {
             is PhotoValidation.Valid -> {
                 onPhotoReceived(request.bodyBytes, validation.imageType)
@@ -1009,7 +1045,18 @@ open class RtspHandler(
         private const val OCTET_STREAM = "application/octet-stream"
         private const val TIMING_PORT = 6002   // matches TimingHandler's UDP NTP port
         private const val SESSION_ID = "iMirrorSession"
-        private const val AUDIO_RTP_PORT = 6001
+
+        /**
+         * UDP port for audio RTP. Even, with [AUDIO_RTCP_PORT] as its odd RTCP companion (RFC 3550)
+         * and clear of [TIMING_PORT]. [AirPlayReceiver] binds exactly this port.
+         */
+        internal const val AUDIO_RTP_PORT = 6000
+
+        /** Advertised audio RTCP port (sender reports). Not bound — see [buildAudioTransport]. */
+        internal const val AUDIO_RTCP_PORT = 6001
+
+        /** Sender's `client_port=a-b` in a SETUP Transport header; names are case-insensitive. */
+        private val CLIENT_PORT = Regex("""client_port\s*=\s*(\d+)(?:\s*-\s*(\d+))?""", RegexOption.IGNORE_CASE)
         private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
     }
 }

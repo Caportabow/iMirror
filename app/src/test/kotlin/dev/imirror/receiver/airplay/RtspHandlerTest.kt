@@ -148,6 +148,45 @@ class RtspHandlerTest {
         assertTrue("First SETUP should be TCP interleaved", "TCP" in transport || "interleaved" in transport)
     }
 
+    @Test
+    fun `audio SETUP echoes the sender's client ports and offers our own server ports`() {
+        val handler = createTestHandler()
+        handler.handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = VALID_SDP_AUDIO_ONLY)
+        )
+
+        val response = handler.handleSetupPublic(
+            RtspRequest(
+                method = "SETUP", uri = "",
+                // Lowercase name on purpose: header lookup must be case-insensitive.
+                headers = mapOf("transport" to "RTP/AVP/UDP;unicast;client_port=53552-53553"),
+                body = ""
+            )
+        )
+
+        val transport = response.headers["Transport"] ?: ""
+        assertTrue("sender ports must be echoed back: $transport", "client_port=53552-53553" in transport)
+        assertTrue("server ports must be ours: $transport", "server_port=6000-6001" in transport)
+        // Timing must not collide with audio RTCP: that was the bug where RTCP hit the NTP handler.
+        assertTrue("timing port must stay separate: $transport", "timing-port=6002" in transport)
+    }
+
+    @Test
+    fun `audio SETUP omits client_port when the sender did not request one`() {
+        val handler = createTestHandler()
+        handler.handleAnnouncePublic(
+            RtspRequest(method = "ANNOUNCE", uri = "", headers = emptyMap(), body = VALID_SDP_AUDIO_ONLY)
+        )
+
+        val response = handler.handleSetupPublic(
+            RtspRequest(method = "SETUP", uri = "", headers = emptyMap(), body = "")
+        )
+
+        val transport = response.headers["Transport"] ?: ""
+        assertFalse("must not invent client ports: $transport", "client_port" in transport)
+        assertTrue("server ports must still be advertised: $transport", "server_port=6000-6001" in transport)
+    }
+
     // ─── RECORD ──────────────────────────────────────────────────────────────
 
     @Test

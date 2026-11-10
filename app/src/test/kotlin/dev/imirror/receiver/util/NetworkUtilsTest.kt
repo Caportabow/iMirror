@@ -110,12 +110,32 @@ class NetworkUtilsTest {
      */
     @Test
     fun `getMacAddress returns a valid MAC address format`() {
-        val mac = NetworkUtils.getMacAddress()
+        val mac = NetworkUtils.getMacAddress(mockContext)
 
         assertNotNull("MAC address should not be null", mac)
         assertTrue(
             "MAC address should match format xx:xx:xx:xx:xx:xx but was: $mac",
             mac.matches(Regex("[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}"))
         )
+    }
+
+    /**
+     * Test: the MAC chosen on first run is reused, even if the set of network interfaces changes.
+     *
+     * WHY: the MAC is the AirPlay `deviceid` and part of the RAOP service name. If it followed
+     * whichever interface happened to be first (p2p0, dummy0, a VPN), macOS would show the same TV
+     * as several different devices.
+     */
+    @Test
+    fun `getMacAddress reuses the persisted address`() {
+        val prefs = mockk<android.content.SharedPreferences>(relaxed = true)
+        every { prefs.getString("imirror_device_mac", null) } returns "11:22:33:44:55:66"
+        every {
+            mockContext.getSharedPreferences("imirror_prefs", Context.MODE_PRIVATE)
+        } returns prefs
+
+        val mac = NetworkUtils.getMacAddress(mockContext)
+
+        assertEquals("11:22:33:44:55:66", mac)
     }
 }

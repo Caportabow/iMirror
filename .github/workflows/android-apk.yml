@@ -21,7 +21,10 @@ concurrency:
 jobs:
   apk:
     name: Assemble release APKs
-    runs-on: ubuntu-latest
+    # Pinned instead of ubuntu-latest: the "latest" alias silently moved to a new
+    # image in November 2026, and a toolchain-sensitive Android build should not
+    # change runner underneath it without us noticing.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -34,11 +37,28 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Resolve SDK path
-        run: echo "ANDROID_SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME}}" >> "$GITHUB_ENV"
+      # No Android setup action: the runner image already ships the SDK
+      # (cmdline-tools, platform-tools) and exports ANDROID_HOME/ANDROID_SDK_ROOT.
+      # android-actions/setup-android@v3 must NOT be used here — it runs
+      # `sdkmanager tools`, and that package was removed from Google's repository,
+      # so the action dies with "Failed to find package 'tools'" before the build
+      # starts. This step only resolves the preinstalled sdkmanager explicitly.
+      - name: Locate Android SDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          # -L so a cmdline-tools/latest symlink to a versioned directory is followed.
+          sdkmanager="$(find -L "${sdk}/cmdline-tools" -maxdepth 3 -type f -name sdkmanager 2>/dev/null | sort | tail -1)"
+          if [ -z "${sdkmanager}" ]; then
+            sdkmanager="$(command -v sdkmanager || true)"
+          fi
+          if [ -z "${sdkmanager}" ]; then
+            echo "::error::No sdkmanager found under ${sdk} — the runner image layout changed."
+            exit 1
+          fi
+          echo "ANDROID_SDK=${sdk}" >> "${GITHUB_ENV}"
+          echo "SDKMANAGER=${sdkmanager}" >> "${GITHUB_ENV}"
+          "${sdkmanager}" --version
 
       # The NDK is ~700 MB and never changes, so it is cached by version. The
       # pinned versions come from app/build.gradle.kts (ndkVersion, cmake version)
@@ -54,7 +74,11 @@ jobs:
 
       - name: Install NDK, CMake and SDK packages
         run: |
-          sdkmanager --install \
+          set -euo pipefail
+          # Licences are pre-accepted on the runner image; this is a no-op there but
+          # keeps the install from blocking on a prompt if that ever changes.
+          "${SDKMANAGER}" --licenses < <(yes) > /dev/null
+          "${SDKMANAGER}" --install \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;28.2.13676358" \

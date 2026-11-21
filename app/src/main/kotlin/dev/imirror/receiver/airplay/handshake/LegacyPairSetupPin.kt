@@ -33,8 +33,18 @@ class LegacyPairSetupPin(private val pin: String, private val accessoryEdPublic:
     private var verifier = BigInteger.ZERO          // v
     private var sessionK = ByteArray(0)             // SRP session key (retained for step-3 AES exchange)
 
-    /** reply = plist to return (null on bad input); complete/failed drive the PIN UI + lockout. */
-    data class Result(val reply: Map<String, Any>?, val complete: Boolean = false, val failed: Boolean = false)
+    /**
+     * reply = plist to return (null on bad input). [pinVerified] means the client's M1 proof matched,
+     * i.e. it knew the PIN — that is the access-control decision and the sender may stream from here.
+     * [complete] additionally means the optional step-3 key exchange (the controller's long-term
+     * Ed25519 key) finished; [failed] drives the PIN-UI + lockout.
+     */
+    data class Result(
+        val reply: Map<String, Any>?,
+        val pinVerified: Boolean = false,
+        val complete: Boolean = false,
+        val failed: Boolean = false
+    )
 
     fun handle(plist: Map<String, Any?>): Result = when {
         plist.containsKey("epk") && plist.containsKey("authTag") -> step3(plist)
@@ -78,7 +88,7 @@ class LegacyPairSetupPin(private val pin: String, private val accessoryEdPublic:
         sessionK = k   // retained for the step-3 AES-GCM key exchange
         val m2 = sha1(aCanon, clientM1, k)                                         // M2 = H(A | M1 | K)
         Logger.i("pair-setup-pin step2: PIN verified → returning M2 (awaiting step-3 key exchange)")
-        return Result(mapOf("proof" to m2))   // NOT complete yet — step 3 (epk/authTag) finishes pairing
+        return Result(mapOf("proof" to m2), pinVerified = true)   // step 3 (epk/authTag) is optional
     }
 
     /**

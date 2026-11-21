@@ -63,6 +63,16 @@ class StreamingScreen @JvmOverloads constructor(
     private var lastSurfaceW = Int.MIN_VALUE
     private var lastSurfaceH = Int.MIN_VALUE
 
+    /**
+     * Invoked on the main thread whenever the SurfaceView recreates its Surface.
+     *
+     * MediaPlayer (AirPlay URL video) keeps a reference to the Surface it was handed, so after an
+     * Activity stop/start or a configuration change it would keep drawing into a destroyed Surface;
+     * the owner uses this to re-attach the new one. The mirror decoder does not need it — it polls
+     * [getSurface] for every frame.
+     */
+    var onSurfaceAvailable: (() -> Unit)? = null
+
     private val handler = Handler(Looper.getMainLooper())
     private val tick = object : Runnable {
         override fun run() {
@@ -101,6 +111,7 @@ class StreamingScreen @JvmOverloads constructor(
                 // Surface is now ready — store reference for VideoDecoder
                 surface = holder.surface
                 Logger.d("StreamingScreen: Surface created")
+                onSurfaceAvailable?.invoke()
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {

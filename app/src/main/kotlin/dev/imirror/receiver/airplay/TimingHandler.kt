@@ -41,9 +41,12 @@ import java.net.DatagramSocket
  *   The 64-bit value packs seconds (high 32 bits) + sub-second fraction (low 32 bits).
  *   Converting from Java millis: add NTP_EPOCH_OFFSET for the seconds, scale % 1000 for fraction.
  *
- * [rtpClockOffsetUs] is updated on every probe response. It represents the estimated
- * offset between our local clock and the sender's RTP clock, in microseconds.
- * [AudioPlayer] uses this to keep audio presentation in sync with video.
+ * [rtpClockOffsetUs] is updated on every probe response as a rough clock-offset estimate.
+ *
+ * It is NOT consumed by playback: [AudioPlayer] and the mirror video pipeline each render frames as
+ * they arrive, and this number also folds in the one-way network delay (the probe carries no
+ * receive timestamp), so applying it as-is would shift — not fix — A/V alignment. Treat it as a
+ * diagnostic until a real presentation-timestamp mapping exists.
  *
  * Usage:
  *   val handler = TimingHandler()
@@ -56,11 +59,12 @@ class TimingHandler {
     @Volatile private var socket: DatagramSocket? = null
 
     /**
-     * Estimated offset between our local clock and the sender's RTP timestamp clock,
-     * in microseconds. Updated on every received timing probe.
+     * Rough estimate of the offset between our local clock and the sender's clock, in microseconds.
+     * Updated on every received timing probe.
      *
-     * AudioPlayer uses this to correct presentation timestamps from the RTP stream,
-     * reducing A/V drift. A value of 0 means no probes have been received yet.
+     * Diagnostic only — see the class KDoc. AudioPlayer does not read it (the KDoc here used to claim
+     * it did, which made an unimplemented A/V-sync path look finished). A value of 0 means no probes
+     * have been received yet.
      */
     @Volatile
     var rtpClockOffsetUs: Long = 0L

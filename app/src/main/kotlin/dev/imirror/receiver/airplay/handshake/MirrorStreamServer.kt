@@ -62,9 +62,12 @@ class MirrorStreamServer(
     private var framesIn = 0
     private var framesDropped = 0
     private var lastStatMs = 0L
-    // Set by the reader thread when a frame is dropped under load; the decoder thread then skips
-    // frames until the next keyframe (IDR) so it never decodes a reference-broken, corrupt stream.
+    // Set when the decoder is rebuilt: a fresh codec has no reference frames, so P-frames decode to
+    // garbage until the next IDR. The decoder thread therefore skips frames until an IDR arrives —
+    // but only for a bounded number of them: macOS mirroring does not reliably send periodic IDRs, and
+    // waiting forever would freeze the picture instead of showing a briefly corrupt one.
     @Volatile private var awaitingKeyframe = false
+    private var framesSkippedAwaitingKeyframe = 0
 
     /** The OS-assigned TCP port macOS should connect to (returned in the SETUP response). */
     val dataPort: Int get() = serverSocket.localPort
@@ -203,6 +206,7 @@ class MirrorStreamServer(
             }
         }
         awaitingKeyframe = true                                // a fresh decoder lost its reference frames
+        framesSkippedAwaitingKeyframe = 0
         StreamStats.videoRes = "${width}x${height}"
         Logger.i("Mirror decoder (re)built for surface (sps=${sps.size}B pps=${pps.size}B)")
     }
@@ -222,15 +226,29 @@ class MirrorStreamServer(
             // CRITICAL: keep lastSps / lastPps so rebuildDecoder can recover with the same configuration!
             return
         }
+        // Advance the presentation hint for every frame, including the ones skipped below, so the
+        // first frame after resync is not stamped with a stale timestamp.
+        val ptsUs = framePtsUs
+        framePtsUs += FRAME_INTERVAL_US
+
         if (awaitingKeyframe) {
             if (isKeyframe(annexB)) {
+                val skipped = framesSkippedAwaitingKeyframe
                 awaitingKeyframe = false
-                Logger.i("Mirror: resynced on keyframe")
+                framesSkippedAwaitingKeyframe = 0
+                Logger.i("Mirror: resynced on keyframe after $skipped skipped frames")
+            } else if (framesSkippedAwaitingKeyframe < MAX_FRAMES_AWAITING_KEYFRAME) {
+                framesSkippedAwaitingKeyframe++
+                return
+            } else {
+                // The sender never sent an IDR: fall back to decoding anyway rather than freezing.
+                awaitingKeyframe = false
+                framesSkippedAwaitingKeyframe = 0
+                Logger.w("Mirror: no keyframe after $MAX_FRAMES_AWAITING_KEYFRAME frames — resuming decode")
             }
         }
-        if (framePtsUs == 0L) Logger.i("Mirror: first video frame fed to decoder (${annexB.size}B)")
-        d.decodeNalUnit(annexB, framePtsUs)
-        framePtsUs += FRAME_INTERVAL_US
+        if (ptsUs == 0L) Logger.i("Mirror: first video frame fed to decoder (${annexB.size}B)")
+        d.decodeNalUnit(annexB, ptsUs)
     }
 
     /** True if the Annex-B frame contains an IDR NAL unit (type 5) — a decodable resync point. */
@@ -268,5 +286,8 @@ class MirrorStreamServer(
         private const val MAX_PAYLOAD = 8 * 1024 * 1024        // 8 MB sanity cap per frame
         private const val FRAME_INTERVAL_US = 1_000_000L / 60  // monotonic PTS hint (~60fps)
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
+        // ~1s at 60fps: long enough for a keyframe the sender does emit, short enough that a
+        // sender which never emits one does not leave the screen frozen.
+        private const val MAX_FRAMES_AWAITING_KEYFRAME = 60
     }
 }

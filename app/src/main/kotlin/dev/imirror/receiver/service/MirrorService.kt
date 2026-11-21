@@ -78,6 +78,12 @@ class MirrorService : Service() {
     private val _pairingPin = MutableStateFlow<String?>(null)
     val pairingPin: StateFlow<String?> = _pairingPin.asStateFlow()
 
+    // The name mDNS actually registered, or null when nothing is advertised. NsdManager resolves a
+    // name collision by registering "Name (2)" — that suffix, not the requested name, is what senders
+    // show in their picker, so the UI needs the real value.
+    private val _actualDisplayName = MutableStateFlow<String?>(null)
+    val actualDisplayName: StateFlow<String?> = _actualDisplayName.asStateFlow()
+
     // Surface provider — supplied by MainActivity after binding (Sprint 5).
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
@@ -99,8 +105,11 @@ class MirrorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Promote to foreground immediately with a persistent notification
-        startForeground(NOTIFICATION_ID, buildNotification(isRunning = false))
+        // Promote to foreground immediately, but keep the notification describing the receiver's real
+        // state. Repainting it as "stopped" here used to strand the notification: opening the app (or
+        // auto-open bringing it forward) sends a redundant ACTION_START, whose early-return in
+        // startAirPlay means no later state change would restore "Streaming from …".
+        startForeground(NOTIFICATION_ID, currentNotification())
 
         when (intent?.action) {
             ACTION_START   -> serviceScope.launch { startReceivers() }
@@ -141,6 +150,17 @@ class MirrorService : Service() {
      */
     fun setVideoSurfaceProvider(provider: () -> Surface?) {
         videoSurfaceProvider = provider
+    }
+
+    /**
+     * Hands the current Surface to media that caches it (AirPlay URL video via MediaPlayer).
+     *
+     * The mirror pipeline re-reads the provider for every frame, so it needs nothing here. Called by
+     * [MainActivity] when its SurfaceView creates a new Surface and right after binding, so returning
+     * from the background does not leave URL playback rendering into a destroyed Surface.
+     */
+    fun refreshVideoSurface() {
+        airPlayReceiver?.attachVideoSurface()
     }
 
     /**
@@ -243,6 +263,9 @@ class MirrorService : Service() {
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
             videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            onActualNameRegistered = { actualName ->
+                _actualDisplayName.value = actualName
+            },
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
@@ -308,6 +331,7 @@ class MirrorService : Service() {
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null
+        _actualDisplayName.value = null
     }
 
     // ─── Notification ────────────────────────────────────────────────────────
@@ -377,12 +401,23 @@ class MirrorService : Service() {
             .build()
     }
 
+    /** Last state drawn into the notification — replayed by [currentNotification] on re-promotion. */
+    @Volatile private var notificationRunning = false
+    @Volatile private var notificationSender: String? = null
+
     private fun updateNotification(isRunning: Boolean, streamingSenderName: String? = null) {
-        val contentText = streamingSenderName?.let {
-            getString(R.string.notification_status_streaming, it)
-        }
+        notificationRunning = isRunning
+        notificationSender = streamingSenderName
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildNotification(isRunning, contentText))
+        manager.notify(NOTIFICATION_ID, buildNotification(isRunning, streamingContentText()))
+    }
+
+    /** Rebuilds the notification for the state currently held in [notificationRunning]/[notificationSender]. */
+    private fun currentNotification(): Notification =
+        buildNotification(notificationRunning, streamingContentText())
+
+    private fun streamingContentText(): String? = notificationSender?.let {
+        getString(R.string.notification_status_streaming, it)
     }
 
     // ─── Binder ─────────────────────────────────────────────────────────────

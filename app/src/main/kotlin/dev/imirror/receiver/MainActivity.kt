@@ -82,6 +82,9 @@ class MainActivity : AppCompatActivity() {
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
             service?.setVideoSurfaceProvider { getVideoSurface() }
+            // The Surface may already exist if the Activity rebound after the SurfaceView was
+            // created — give MediaPlayer-based URL playback the live Surface immediately.
+            service?.refreshVideoSurface()
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
@@ -167,6 +170,9 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setupOverlayScreens() {
         streamingScreen = StreamingScreen(this)
+        // A SurfaceView recreates its Surface when the Activity returns to the foreground; URL video
+        // holds the old one inside MediaPlayer, so tell the service to re-attach it.
+        streamingScreen.onSurfaceAvailable = { service?.refreshVideoSurface() }
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this)
         pinScreen = PinScreen(this)
@@ -249,8 +255,17 @@ class MainActivity : AppCompatActivity() {
         setKeepScreenOn(true)
     }
 
+    /**
+     * Shows an AirPlay `/photo` payload. The decode happens off the main thread in [PhotoScreen], so
+     * this returns immediately and the overlay switches only once the bitmap is ready.
+     */
     fun showPhotoScreen(photoFrame: PhotoFrame) {
-        if (photoScreen.showPhoto(photoFrame.bytes)) {
+        photoScreen.showPhoto(photoFrame.bytes) shown@{
+            // The decode is asynchronous: by the time it finishes, a newer photo or a video stream may
+            // have taken over. Only push the photo forward if it is still the current state.
+            if (currentPhotoFrame !== photoFrame || currentAirPlayState == ProtocolState.CONNECTED) {
+                return@shown
+            }
             streamingScreen.visibility = View.GONE
             nowPlayingScreen.visibility = View.GONE
             pinScreen.visibility = View.GONE

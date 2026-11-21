@@ -102,17 +102,20 @@ class SettingsRepository(private val context: Context) {
 
     /**
      * Maps a raw DataStore [Preferences] snapshot to an [AppSettings] data class.
-     * Missing keys fall back to their default values in [AppSettings].
+     *
+     * Missing keys fall back to [AppSettings.DEFAULT], never to literals repeated here: two copies of
+     * the same default is how `mirrorAudioEnabled` ended up documented as off while the code shipped
+     * it on. Change a default in one place — [AppSettings] — and persistence follows.
      */
-    private fun Preferences.toAppSettings(): AppSettings = AppSettings(
-        displayName        = this[Keys.DISPLAY_NAME]            ?: "Pratik AirPlay",
-        airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: true,
-        airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
-        autoOpenOnConnect  = this[Keys.AUTO_OPEN_ON_CONNECT]    ?: false,
-        startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
-        showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
-        forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
-        mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true
+    private fun Preferences.toAppSettings(): AppSettings = AppSettings.DEFAULT.copy(
+        displayName        = this[Keys.DISPLAY_NAME]            ?: AppSettings.DEFAULT.displayName,
+        airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: AppSettings.DEFAULT.airPlayEnabled,
+        airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: AppSettings.DEFAULT.airPlayPinAuthEnabled,
+        autoOpenOnConnect  = this[Keys.AUTO_OPEN_ON_CONNECT]    ?: AppSettings.DEFAULT.autoOpenOnConnect,
+        startOnBoot        = this[Keys.START_ON_BOOT]           ?: AppSettings.DEFAULT.startOnBoot,
+        showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: AppSettings.DEFAULT.showDebugOverlay,
+        forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: AppSettings.DEFAULT.forceHighResolution,
+        mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: AppSettings.DEFAULT.mirrorAudioEnabled
     )
 
     /**

@@ -23,6 +23,7 @@ import dev.imirror.receiver.R
 import dev.imirror.receiver.settings.AppSettings
 import dev.imirror.receiver.settings.SettingsRepository
 import dev.imirror.receiver.util.Logger
+import dev.imirror.receiver.util.MdnsLabel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -35,7 +36,9 @@ import kotlinx.coroutines.launch
  *
  * HOW: Reads current settings from [SettingsRepository] and populates the UI.
  * Each toggle/row saves immediately when changed (no "Save" button needed).
- * Settings changes take effect on the next service restart.
+ * Anything the receiver reads once at startup (AirPlay on/off, device name, resolution, debug
+ * overlay, PIN auth, mirror audio) restarts the receivers so the change applies right away instead
+ * of silently waiting for a later manual restart.
  *
  * Navigation: accessed via the "Settings" item in MainActivity's nav panel.
  */
@@ -64,6 +67,9 @@ class SettingsFragment : Fragment() {
     private lateinit var textVersionValue: TextView
     private lateinit var rowReset: LinearLayout
 
+    /** Set when the user turned automatic open on and was sent to grant the overlay permission. */
+    private var pendingAutoOpenEnable = false
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
         inflater.inflate(R.layout.fragment_settings, container, false)
 
@@ -74,6 +80,16 @@ class SettingsFragment : Fragment() {
         setSectionTitles()
         setRowLabels()
         loadAndPopulate()
+    }
+
+    /**
+     * The overlay permission is granted in a different app (system Settings), so the toggle must be
+     * reconciled when the user comes back — otherwise granting the permission left the switch off and
+     * asked for a second tap, and revoking it left the stored preference silently true.
+     */
+    override fun onResume() {
+        super.onResume()
+        refreshAutoOpenRow()
     }
 
     // ─── View Binding ────────────────────────────────────────────────────────
@@ -176,6 +192,31 @@ class SettingsFragment : Fragment() {
     }
 
     /**
+     * Re-reads the auto-open preference and the overlay permission, completing the enable that was
+     * interrupted by the trip to system Settings and keeping the switch honest about both.
+     */
+    private fun refreshAutoOpenRow() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val granted = Settings.canDrawOverlays(requireContext())
+            val settings = settingsRepository.settingsFlow.first()
+
+            if (pendingAutoOpenEnable && granted) {
+                if (!settings.autoOpenOnConnect) {
+                    settingsRepository.update { it.copy(autoOpenOnConnect = true) }
+                }
+                pendingAutoOpenEnable = false
+                setToggle(rowAutoOpen, true)
+                Logger.i("Overlay permission granted — automatic open enabled")
+                return@launch
+            }
+
+            // Permission revoked behind our back: the stored value stays true so it comes back to
+            // life if the user re-grants it, but the switch must not claim it is working now.
+            setToggle(rowAutoOpen, settings.autoOpenOnConnect && granted)
+        }
+    }
+
+    /**
      * Sets up click and toggle listeners for all settings rows.
      * Each listener immediately persists the change via [SettingsRepository.update].
      *
@@ -185,7 +226,10 @@ class SettingsFragment : Fragment() {
     private fun setupListeners() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
-        setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
+        // Toggling AirPlay only flips the mDNS advertisement and port 7000, so it must restart:
+        // saving alone left the receiver advertising and accepting connections while the switch read
+        // "off". Same for the other startup-only settings.
+        setToggleListener(rowAirPlay)      { enabled -> saveAndRestart { it.copy(airPlayEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowAutoOpen) { enabled ->
@@ -197,10 +241,12 @@ class SettingsFragment : Fragment() {
                     .setPositiveButton(android.R.string.ok) { _, _ ->
                         val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                             Uri.parse("package:${requireContext().packageName}"))
-                        runCatching { startActivity(intent) }.onFailure {
-                            Toast.makeText(requireContext(), R.string.setting_auto_open_unavailable,
-                                Toast.LENGTH_LONG).show()
-                        }
+                        runCatching { startActivity(intent) }
+                            .onSuccess { pendingAutoOpenEnable = true }
+                            .onFailure {
+                                Toast.makeText(requireContext(), R.string.setting_auto_open_unavailable,
+                                    Toast.LENGTH_LONG).show()
+                            }
                     }
                     .setNegativeButton(android.R.string.cancel, null)
                     .show()
@@ -209,8 +255,8 @@ class SettingsFragment : Fragment() {
             }
         }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
-        setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
-        setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
+        setToggleListener(rowDebugOverlay) { enabled -> saveAndRestart { it.copy(showDebugOverlay = enabled) } }
+        setToggleListener(rowForceHighRes) { enabled -> saveAndRestart { it.copy(forceHighResolution = enabled) } }
 
         rowReset.setOnClickListener { resetSettings() }
     }
@@ -239,8 +285,9 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Saves a setting that the AirPlay receiver only reads at startup (mirror-audio, PIN auth), then
-     * restarts the service so the change applies immediately instead of on the next manual restart.
+     * Saves a setting that the AirPlay receiver only reads at startup (AirPlay on/off, device name,
+     * mirror-audio, PIN auth, resolution, debug overlay), then restarts the receivers so the change
+     * applies immediately instead of on the next manual restart.
      */
     private fun saveAndRestart(transform: (AppSettings) -> AppSettings) {
         viewLifecycleOwner.lifecycleScope.launch {
@@ -258,7 +305,8 @@ class SettingsFragment : Fragment() {
      *
      * TV UX notes:
      * - The EditText is pre-filled with the current name (empty = system default)
-     * - Max length is enforced to [AppSettings.DISPLAY_NAME_MAX_LENGTH] (63 chars, mDNS limit)
+     * - The dialog limits input to [AppSettings.DISPLAY_NAME_MAX_LENGTH] characters; the saved value
+     *   is then clamped to the mDNS label budget in bytes (see [MdnsLabel])
      * - "OK" saves the new name; "Reset to default" clears to "" (system name); "Cancel" = no-op
      * - Name trimming is applied on save — pure-whitespace names are treated as blank
      *
@@ -287,15 +335,24 @@ class SettingsFragment : Fragment() {
             .setTitle(R.string.setting_display_name)
             .setView(editText)
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                val newName = editText.text?.toString()?.trim() ?: ""
-                save { it.copy(displayName = newName) }
+                val typed = editText.text?.toString()?.trim() ?: ""
+                // The dialog limits characters, but mDNS limits bytes (Cyrillic is 2 bytes/char), and
+                // an over-long label fails registration and hides the device. Clamp and say so.
+                val newName = MdnsLabel.clampUtf8(typed, MdnsLabel.MAX_LABEL_BYTES)
+                if (newName.length < typed.length) {
+                    Toast.makeText(requireContext(), R.string.setting_display_name_truncated,
+                        Toast.LENGTH_LONG).show()
+                }
+                // The name is baked into the mDNS registration at startup — re-register on change so
+                // the sender menu shows the new name immediately.
+                saveAndRestart { it.copy(displayName = newName) }
                 textDisplayNameValue.text = newName.ifEmpty {
                     getString(R.string.setting_display_name_system_default)
                 }
                 Logger.i("Display name updated to: '${newName.ifEmpty { "(system default)" }}'")
             }
             .setNeutralButton(R.string.setting_display_name_reset) { _, _ ->
-                save { it.copy(displayName = "") }
+                saveAndRestart { it.copy(displayName = "") }
                 textDisplayNameValue.text = getString(R.string.setting_display_name_system_default)
                 Logger.i("Display name reset to system default")
             }
